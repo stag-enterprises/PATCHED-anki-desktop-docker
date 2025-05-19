@@ -14,7 +14,7 @@ RUN \
   mkdir -p /config/.local/share && \
   ln -s /config/app/Anki  /config/.local/share/Anki && \
   ln -s /config/app/Anki2 /config/.local/share/Anki2 && \
-  echo software > ~/.local/share/Anki2/gldriver6
+  echo software >/config/.local/share/Anki2/gldriver6
 
 VOLUME "/config/app" 
 

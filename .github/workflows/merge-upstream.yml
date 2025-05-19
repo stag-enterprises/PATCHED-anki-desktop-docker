@@ -1,0 +1,219 @@
+name: Sync upstream
+
+on:
+  workflow_call:
+    inputs:
+      source:
+        description: 'The Git source URL'
+        type: string
+        required: true
+      source_branch:
+        description: 'Branch name in the source repo to merge from'
+        type: string
+        required: true
+        default: 'main'
+      target_branch:
+        description: 'Branch to merge into'
+        type: string
+        required: true
+        default: 'main'
+      pr_prefix:
+        description: 'Prefix for PR title'
+        type: string
+        required: false
+        default: 'Sync upstream: '
+  workflow_dispatch:
+    inputs:
+      source:
+        description: 'The Git source URL'
+        required: true
+      source_branch:
+        description: 'Branch name in the source repo to merge from'
+        required: true
+        default: 'main'
+      target_branch:
+        description: 'Branch to merge into'
+        required: true
+        default: 'main'
+      pr_prefix:
+        description: 'Prefix for PR title'
+        required: false
+        default: 'Sync upstream: '
+
+permissions:
+  contents: write       # To push the sync branch and delete it if not needed
+  pull-requests: write  # To create PR and enable auto-merge
+
+jobs:
+  sync_and_pr:
+    name: Sync External History and Create PR
+    runs-on: ubuntu-latest
+    outputs:
+      pr_url: ${{ steps.create_pr.outputs.pr_url }}
+      sync_branch_name: ${{ steps.prepare_branch.outputs.sync_branch_name }}
+      pr_skipped: ${{ steps.pr_needed.outputs.skip_pr }}
+
+    steps:
+      - name: Execute Harden Runner
+        uses: step-security/harden-runner@c6295a65d1254861815972266d5933fd6e532bdf # v2.11.1
+        with:
+          egress-policy: audit
+          disable-telemetry: true
+
+      - name: Configure Git user
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Prepare sync branch
+        id: prepare_branch
+        shell: bash
+        run: |
+          UPSTREAM_URL="${{ inputs.source }}"
+          UPSTREAM_BRANCH="${{ inputs.source_branch }}"
+          TARGET_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          TEMP_DIR=$(mktemp -d)
+
+          echo "cloning '$UPSTREAM_BRANCH' from '$UPSTREAM_URL'"
+          git clone --branch "$UPSTREAM_BRANCH" "$UPSTREAM_URL" "$TEMP_DIR"
+          cd "$TEMP_DIR"
+
+          UPSTREAM_SHA=$(git rev-parse HEAD)
+          if [ -z "$UPSTREAM_SHA" ]; then
+            echo "err! couldn't get upstream HEAD's sha :<"
+            exit 1
+          fi
+          echo "upstream HEAD's sha: $UPSTREAM_SHA"
+          
+          UPSTREAM_BRANCH_CLEAN=$(echo "$UPSTREAM_BRANCH" | tr '/' '-')
+          UPSTREAM_SHA_SHORT=$(echo "$UPSTREAM_SHA" | cut -c1-12)
+          TIMESTAMP=$(date +%s)
+          SYNC_BRANCH="sync/${UPSTREAM_BRANCH_CLEAN}-${UPSTREAM_SHA_SHORT}-${TIMESTAMP}"
+
+          echo "sync branch name: $SYNC_BRANCH"
+
+          echo "sync_branch_name=$SYNC_BRANCH" >> $GITHUB_OUTPUT
+          echo "external_head_sha=$UPSTREAM_SHA" >> $GITHUB_OUTPUT
+          echo "external_head_sha_short=$UPSTREAM_SHA_SHORT" >> $GITHUB_OUTPUT
+
+          echo "pushing upstream HEAD to the sync branch"
+          git push "$TARGET_URL" "HEAD:refs/heads/$SYNC_BRANCH"
+          
+          cd ..
+          rm -rf "$TEMP_DIR"
+
+      - name: Check if a PR is needed
+        id: pr_needed
+        shell: bash
+        run: |
+          TARGET_BRANCH="${{ inputs.target_branch }}"
+          SYNC_BRANCH="${{ steps.prepare_branch.outputs.sync_branch_name }}"
+          TARGET_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          TEMP_DIR=$(mktemp -d)
+          SKIP_PR="false"
+
+          echo "does '$SYNC_BRANCH' need a merge into '$TARGET_BRANCH'? checking this"
+          git clone "$TARGET_URL" "$TEMP_DIR"
+          cd "$TEMP_DIR"
+
+          if ! git fetch origin "$TARGET_BRANCH"; then
+            echo "err: target branch '$TARGET_BRANCH' doesn't exist :<"
+            exit 1
+          fi
+          if ! git fetch origin "$SYNC_BRANCH"; then
+            echo "err: sync branch '$SYNC_BRANCH' doesn't exist :<"
+            exit 1
+          fi
+
+          TARGET_BRANCH_REF="origin/$TARGET_BRANCH"
+          SYNC_BRANCH_REF="origin/$SYNC_BRANCH"
+
+          TARGET_BRANCH_SHA=$(git rev-parse "$TARGET_BRANCH_REF")
+          SYNC_BRANCH_SHA=$(git rev-parse "$SYNC_BRANCH_REF")
+
+          echo "'$TARGET_BRANCH_REF' has sha: $TARGET_BRANCH_SHA"
+          echo "'$SYNC_BRANCH_REF' has sha: $SYNC_BRANCH_SHA"
+
+          if [ "$TARGET_BRANCH_SHA" == "$SYNC_BRANCH_SHA" ]; then
+            echo "branches are identical, no PR needed!"
+            SKIP_PR="true"
+          else
+            NEW_COMMITS_LEN=$(git rev-list --count "$TARGET_BRANCH_REF".."$SYNC_BRANCH_REF")
+            echo "how many new commits does the sync branch have? $NEW_COMMITS_LEN"
+
+            if [ "$NEW_COMMITS_LEN" -eq 0 ]; then
+              echo "there are no new commits? target might be ahead."
+              SKIP_PR="true"
+            else
+              echo "wowzers, there's new commits. a PR will be created."
+              SKIP_PR="false"
+            fi
+          fi
+          
+          echo "skip_pr=$SKIP_PR" >> $GITHUB_OUTPUT
+
+          if [ "$SKIP_PR" == "true" ]; then
+            echo "no PR going to be made, deleting the sync branch"
+            git push origin --delete "$SYNC_BRANCH"
+          fi
+          
+          cd ..
+          rm -rf "$TEMP_DIR"
+
+      - name: Create pull request
+        if: steps.pr_needed.outputs.skip_pr == 'false'
+        id: create_pr
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          SYNC_BRANCH="${{ steps.prepare_branch.outputs.sync_branch_name }}"
+          UPSTREAM_SHA="${{ steps.prepare_branch.outputs.external_head_sha }}"
+          UPSTREAM_SHA_SHORT="${{ steps.prepare_branch.outputs.external_head_sha_short }}"
+          PR_TITLE="${{ inputs.pr_prefix }} ${{ inputs.source_branch }} into ${{ inputs.target_branch }} - SHA ${UPSTREAM_SHA_SHORT}"
+          
+          PR_BODY="
+          Syncing from: \`${{ inputs.source }}\` (branch: \`${{ inputs.source_branch }}\`)
+
+          External source commit: \`${UPSTREAM_SHA}\`
+
+          Commits from \`$SYNC_BRANCH\` are to be merged onto \`${{ inputs.target_branch }}\`.
+          "
+
+          echo "creating PR of title: $PR_TITLE"
+          PR_URL=$(gh pr create \
+            --base "${{ inputs.target_branch }}" \
+            --head "$SYNC_BRANCH" \
+            --title "$PR_TITLE" \
+            --body "$PR_BODY" 2>&1)
+
+          if [[ "$PR_URL" == https* ]]; then
+            echo "the PR was created! it's here: $PR_URL"
+            echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+          else
+            EXISTING_PR_URL=$(gh pr list --head "$SYNC_BRANCH" --state open --json url --limit 1 --jq ".[0].url")
+            if [ -n "$EXISTING_PR_URL" ] && [ "$EXISTING_PR_URL" != "null" ]; then
+              echo "sync branch '$SYNC_BRANCH' already has a PR: $EXISTING_PR_URL"
+              echo "pr_url=$EXISTING_PR_URL" >> $GITHUB_OUTPUT
+            else
+              echo "err: couldn't create a pr, cmd output as follows"
+              echo "$PR_URL_OR_ERROR"
+              exit 1
+            fi
+          fi
+
+      - name: Enable Auto-Merge for PR
+        if: steps.pr_needed.outputs.skip_pr == 'false' && (steps.create_pr.outputs.pr_url != '' || steps.create_pr.outcome == 'success')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_IDENTIFIER="${{ steps.create_pr.outputs.pr_url }}"
+          if [ -z "$PR_IDENTIFIER" ]; then
+            PR_IDENTIFIER="${{ steps.prepare_branch.outputs.sync_branch_name }}"
+          fi
+
+          echo "trying to enable rebase auto-merge for: $PR_IDENTIFIER"
+          sleep 5 # give time for pr to be created
+          gh pr merge "$PR_IDENTIFIER" --rebase --auto

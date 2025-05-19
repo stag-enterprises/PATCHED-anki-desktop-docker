@@ -1,0 +1,17 @@
+name: Poll for upstream updates
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 16 * * *'
+
+jobs:
+  poll-updates:
+    name: Execute merge-upstream
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: ./.github/workflows/merge-upstream.yml
+    with:
+      source: https://github.com/mlcivilengineer/anki-desktop-docker.git
+      source_branch: main
+      target_branch: main

@@ -12,6 +12,7 @@ RUN \
   apt-get purge -y --auto-remove wget zstd && \
   apt-get clean && \
   mkdir -p /config/.local/share && \
+  mkdir -p /config/app/Anki && \
   mkdir -p /config/app/Anki2 && \
   ln -s /config/app/Anki  /config/.local/share/Anki && \
   ln -s /config/app/Anki2 /config/.local/share/Anki2 && \

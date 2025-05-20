@@ -11,13 +11,9 @@ RUN \
   rm -rf anki-${ANKI_VERSION}-linux-qt6 anki-${ANKI_VERSION}-linux-qt6.tar.zst && \
   apt-get purge -y --auto-remove wget zstd && \
   apt-get clean && \
-  mkdir -p /config/.local/share && \
-  mkdir -p /config/app/Anki && \
-  mkdir -p /config/app/Anki2 && \
-  ln -s /config/app/Anki  /config/.local/share/Anki && \
-  ln -s /config/app/Anki2 /config/.local/share/Anki2 && \
+  mkdir -p /config/.local/share/Anki2 && \
   echo software >/config/.local/share/Anki2/gldriver6
 
-VOLUME "/config/app" 
+VOLUME "/config/.local/share/Anki2" 
 
 COPY ./root /
